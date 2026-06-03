@@ -1,2 +1,2 @@
 # Ous
-v.Local
+Run `cargo run` then open http://localhost:8080
