@@ -1,0 +1,6 @@
+{
+  "type": "project",
+  "name": "Improve guided capture",
+  "context_hint": "work",
+  "require_approval": true
+}
