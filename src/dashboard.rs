@@ -1,12 +1,14 @@
 use super::bus::MessageBus;
+use super::memory_manager::MemoryManager;
 use std::sync::Arc;
-use tiny_http::{Server, Response, Header};
+use tiny_http::{Server, Response, Header, Method};
 use std::str::FromStr;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use serde_json::Value;
 pub type SharedProjectMap = Arc<Mutex<HashMap<String, Value>>>;
-pub async fn run_server(_bus: Arc<MessageBus>, projects: SharedProjectMap, addr: &str) {
+pub async fn run_server(bus: Arc<MessageBus>, projects: SharedProjectMap, addr: &str) {
+    let memory_manager = Arc::new(MemoryManager::new("data/memory/ledger.jsonl"));
     let server = Server::http(addr).unwrap();
     println!("Dashboard: http://{}", addr);
     let html = r#"<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Ous Dashboard</title>
@@ -64,22 +66,74 @@ pub async fn run_server(_bus: Arc<MessageBus>, projects: SharedProjectMap, addr:
     let content_type_html = Header::from_str("Content-Type: text/html").unwrap();
     let content_type_json = Header::from_str("Content-Type: application/json").unwrap();
     loop {
-        if let Ok(req) = server.recv() {
+        if let Ok(mut req) = server.recv() {
             let url = req.url();
-            let resp = match url {
-                "/" | "/index.html" => Response::from_string(html).with_header(content_type_html.clone()),
-                "/status.json" => {
+            let method = req.method();
+            let resp = match (method, url) {
+                (Method::Get, "/" | "/index.html") => Response::from_string(html).with_header(content_type_html.clone()),
+                (Method::Get, "/status.json") => {
                     let status = std::fs::read_to_string("status.json").unwrap_or_else(|_| "{}".into());
                     Response::from_string(status).with_header(content_type_json.clone())
                 }
-                "/api/projects" => {
+                (Method::Get, "/api/projects") => {
                     let map = projects.lock().unwrap();
                     let list: Vec<Value> = map.values().cloned().collect();
                     Response::from_string(serde_json::to_string(&list).unwrap()).with_header(content_type_json.clone())
                 }
-                "/api/system" => {
+                (Method::Get, "/api/system") => {
                     let system = std::fs::read_to_string("data/system_map.json").unwrap_or_else(|_| "{}".into());
                     Response::from_string(system).with_header(content_type_json.clone())
+                }
+                (Method::Post, "/capture") => {
+                    let mut body = String::new();
+                    if let Ok(_) = req.as_reader().read_to_string(&mut body) {
+                        if let Ok(json) = serde_json::from_str::<Value>(&body) {
+                            let text = json.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            let source = json.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                            let capture_id = format!("capture:{}", uuid::Uuid::new_v4());
+                            let entry = memory_manager.new_capture_entry(&capture_id, text, source);
+                            match memory_manager.append(entry) {
+                                Ok(_) => {
+                                    println!("[Dashboard] Captured: {} from {}", text, source);
+                                    Response::from_string("{\"status\":\"ok\"}").with_header(content_type_json.clone())
+                                }
+                                Err(e) => Response::from_string(format!("{{\"error\":\"{}\"}}", e)).with_status_code(500)
+                            }
+                        } else {
+                            Response::from_string("{\"error\":\"invalid json\"}").with_status_code(400)
+                        }
+                    } else {
+                        Response::from_string("{\"error\":\"read failed\"}").with_status_code(400)
+                    }
+                }
+                (Method::Post, "/dream") => {
+                    bus.publish("dream:trigger", "");
+                    println!("[Dashboard] Dream trigger published");
+                    Response::from_string("{\"status\":\"dream_triggered\"}").with_header(content_type_json.clone())
+                }
+                (Method::Post, "/approve") => {
+                    let mut body = String::new();
+                    if let Ok(_) = req.as_reader().read_to_string(&mut body) {
+                        if let Ok(json) = serde_json::from_str::<Value>(&body) {
+                            if let Some(id) = json.get("id").and_then(|v| v.as_str()) {
+                                std::fs::create_dir_all("data/packets/approval").ok();
+                                let path = format!("data/packets/approval/{}.json", id);
+                                match std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap()) {
+                                    Ok(_) => {
+                                        println!("[Dashboard] Approved: {}", id);
+                                        Response::from_string("{\"status\":\"approved\"}").with_header(content_type_json.clone())
+                                    }
+                                    Err(e) => Response::from_string(format!("{{\"error\":\"{}\"}}", e)).with_status_code(500)
+                                }
+                            } else {
+                                Response::from_string("{\"error\":\"missing id\"}").with_status_code(400)
+                            }
+                        } else {
+                            Response::from_string("{\"error\":\"invalid json\"}").with_status_code(400)
+                        }
+                    } else {
+                        Response::from_string("{\"error\":\"read failed\"}").with_status_code(400)
+                    }
                 }
                 _ => Response::from_string("404").with_status_code(404),
             };

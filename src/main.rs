@@ -18,6 +18,7 @@ mod work_manager;
 mod daily_notes;
 mod minor_league;
 mod dreaming;
+mod melatonin;
 
 use tokio::task;
 use bus::MessageBus;
@@ -37,12 +38,14 @@ use work_manager::run_work_manager;
 use daily_notes::run_daily_writer;
 use minor_league::run_pruner;
 use dreaming::run_dreaming;
+use melatonin::run_melatonin;
 use memory_manager::MemoryManager;
 use ai_router::AIExecutor;
 use tokio::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::collections::HashMap;
+use chrono::{Utc, Timelike, Datelike};
 
 #[tokio::main]
 async fn main() {
@@ -83,6 +86,32 @@ async fn main() {
     task::spawn(run_daily_writer(memory_manager.clone()));
     task::spawn(run_pruner(memory_manager.clone()));
     task::spawn(run_dreaming(bus.clone(), memory_manager.clone(), ai_executor.clone()));
+
+    let sched_bus = bus.clone();
+    let sched_mem = memory_manager.clone();
+    task::spawn(async move {
+        let mut last_melatonin_day = -1;
+        let mut last_dream_day = -1;
+        loop {
+            let now = Utc::now();
+            let hour = now.hour();
+            let day = now.ordinal();
+
+            if hour == 1 && last_melatonin_day != day as i32 {
+                println!("[Scheduler] Triggering melatonin at 1AM UTC");
+                task::spawn(run_melatonin(sched_mem.clone()));
+                last_melatonin_day = day as i32;
+            }
+
+            if hour == 2 && last_dream_day != day as i32 {
+                println!("[Scheduler] Publishing dream:trigger at 2AM UTC");
+                sched_bus.publish("dream:trigger", "");
+                last_dream_day = day as i32;
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        }
+    });
 
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;

@@ -30,9 +30,15 @@ pub async fn run_dreaming(bus: Arc<MessageBus>, memory_manager: Arc<MemoryManage
                 let memory_path = "data/memory/MEMORY.md";
                 let existing_memory = fs::read_to_string(memory_path).unwrap_or_default();
                 let recent_json = serde_json::to_string_pretty(&recent_entries).unwrap_or_default();
+
+                let mut suggestions = String::new();
+                if let Ok(staging_json) = fs::read_to_string("data/memory/melatonin_staging.json") {
+                    suggestions = format!("SUGGESTIONS (not authoritative):\n{}\n\n", staging_json);
+                }
+
                 let prompt = format!(
-                    "You are Ous, a cognitive OS. Review the following recent journal entries and the existing MEMORY.md. Propose updates to MEMORY.md (add/update/remove) as a JSON list of actions. Each action: {{\"action\":\"add\",\"section\":\"...\",\"content\":\"...\"}} or {{\"action\":\"update\",\"section\":\"...\",\"old\":\"...\",\"new\":\"...\"}}. Output ONLY valid JSON.\n\nRecent entries:\n{}\n\nExisting MEMORY.md:\n{}\n",
-                    recent_json, existing_memory
+                    "You are Ous, a cognitive OS. Review the following recent journal entries and the existing MEMORY.md. Propose updates to MEMORY.md (add/update/remove) as a JSON list of actions. Each action: {{\"action\":\"add\",\"section\":\"...\",\"content\":\"...\"}} or {{\"action\":\"update\",\"section\":\"...\",\"old\":\"...\",\"new\":\"...\"}}. Output ONLY valid JSON.\n\n{}\nRecent entries:\n{}\n\nExisting MEMORY.md:\n{}\n",
+                    suggestions, recent_json, existing_memory
                 );
                 match ai_executor.execute("summarize", &prompt).await {
                     Ok(ai_output) => {
