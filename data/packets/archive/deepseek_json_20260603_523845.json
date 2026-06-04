@@ -1,0 +1,5 @@
+{
+  "id": "note-001",
+  "prompt": "We decided to change workspace cycle time from 300ms to 500ms because CPU was too chatty.",
+  "require_approval": true
+}

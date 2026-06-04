@@ -1,4 +1,4 @@
-﻿use super::bus::MessageBus;
+use super::bus::MessageBus;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, interval};
@@ -47,7 +47,7 @@ impl GlobalWorkspace {
             }
             if let Some(winner) = best_bid {
                 bus.publish("workspace", &winner.content);
-                println!("[WORKSPACE] Winner: {} (strength={:.2})", winner.content, winner.strength);
+                // suppressed
                 self.inhibition.insert(winner.sensor_name.clone(), 0.5);
                 for (_, inhib) in self.inhibition.iter_mut() {
                     *inhib = (*inhib + 0.1).min(1.0);

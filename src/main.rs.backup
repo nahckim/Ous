@@ -1,0 +1,564 @@
+﻿// src/main.rs – Ous with Memory Manager, Guided Capture, Ollama AI (Send-safe)
+
+mod bus {
+    use tokio::sync::broadcast;
+    pub struct MessageBus { sender: broadcast::Sender<String> }
+    impl MessageBus {
+        pub fn new() -> Self { let (tx, _) = broadcast::channel(256); Self { sender: tx } }
+        pub fn publish(&self, topic: &str, payload: &str) {
+            let _ = self.sender.send(format!("{}:{}", topic, payload));
+        }
+        pub fn subscribe(&self) -> broadcast::Receiver<String> {
+            self.sender.subscribe()
+        }
+    }
+}
+
+mod workspace {
+    use super::bus::MessageBus;
+    use std::sync::Arc;
+    use tokio::time::{Duration, interval};
+    pub struct GlobalWorkspace { cycle_ms: u64 }
+    impl GlobalWorkspace {
+        pub fn new(cycle_ms: u64) -> Self { Self { cycle_ms } }
+        pub async fn run(&self, bus: Arc<MessageBus>) {
+            let mut interval = interval(Duration::from_millis(self.cycle_ms));
+            loop {
+                interval.tick().await;
+                bus.publish("workspace", "cpu:42%");
+            }
+        }
+    }
+}
+
+mod sensors {
+    use super::bus::MessageBus;
+    use std::sync::Arc;
+    use sysinfo::System;
+    use tokio::time::{sleep, Duration};
+    pub async fn cpu_sensor(bus: Arc<MessageBus>) {
+        let mut sys = System::new_all();
+        loop {
+            sys.refresh_cpu();
+            let cpu = sys.global_cpu_info().cpu_usage();
+            bus.publish("sensor", &format!("cpu:{:.0}", cpu));
+            sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+mod actions {
+    use super::bus::MessageBus;
+    use std::sync::Arc;
+    pub async fn print_action(bus: Arc<MessageBus>) {
+        let mut rx = bus.subscribe();
+        loop {
+            if let Ok(msg) = rx.recv().await {
+                if msg.starts_with("workspace:") {
+                    println!("[CONSCIOUS] {}", &msg[10..]);
+                }
+            }
+        }
+    }
+}
+
+mod observer {
+    use super::bus::MessageBus;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    pub async fn pattern_observer(bus: Arc<MessageBus>) {
+        let mut rx = bus.subscribe();
+        let mut history = VecDeque::with_capacity(100);
+        loop {
+            if let Ok(msg) = rx.recv().await {
+                if msg.starts_with("pattern:") || msg.starts_with("workspace:") { continue; }
+                history.push_back(msg.clone());
+                if history.len() > 100 { history.pop_front(); }
+                let last10: Vec<&String> = history.iter().rev().take(10).collect();
+                let count = last10.iter().filter(|&m| *m == &msg).count();
+                if count >= 3 {
+                    println!("[OBSERVER] Pattern detected: {}", msg);
+                    bus.publish("pattern", &format!("pattern:{}", msg));
+                }
+            }
+        }
+    }
+}
+
+mod dashboard {
+    use super::bus::MessageBus;
+    use std::sync::Arc;
+    use tiny_http::{Server, Response, Header};
+    use std::str::FromStr;
+    pub async fn run_server(_bus: Arc<MessageBus>, addr: &str) {
+        let server = Server::http(addr).unwrap();
+        println!("Dashboard: http://{}", addr);
+        let html = r#"<!DOCTYPE html><html><body><h1>Ous</h1><pre id="s">Loading...</pre><script>setInterval(async()=>{let r=await fetch('/status.json');let d=await r.json();document.getElementById('s').innerText=JSON.stringify(d,null,2);},2000);</script></body></html>"#;
+        let content_type = Header::from_str("Content-Type: text/html").unwrap();
+        let json_type = Header::from_str("Content-Type: application/json").unwrap();
+        loop {
+            if let Ok(req) = server.recv() {
+                let resp = match req.url() {
+                    "/" | "/index.html" => Response::from_string(html).with_header(content_type.clone()),
+                    "/status.json" => {
+                        let status = std::fs::read_to_string("status.json").unwrap_or_else(|_| "{}".into());
+                        Response::from_string(status).with_header(json_type.clone())
+                    }
+                    _ => Response::from_string("404").with_status_code(404),
+                };
+                let _ = req.respond(resp);
+            }
+        }
+    }
+}
+
+mod status_writer {
+    use super::bus::MessageBus;
+    use std::sync::Arc;
+    use serde_json::json;
+    use tokio::fs;
+    pub async fn write_status_on_change(bus: Arc<MessageBus>) {
+        let mut rx = bus.subscribe();
+        let mut last = String::new();
+        loop {
+            tokio::select! {
+                Ok(msg) = rx.recv() => {
+                    let s = json!({ "last_event": msg, "timestamp": chrono::Utc::now().to_rfc3339() }).to_string();
+                    if s != last { let _ = fs::write("status.json", &s).await; last = s; }
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
+                    let s = json!({ "heartbeat": chrono::Utc::now().to_rfc3339() }).to_string();
+                    if s != last { let _ = fs::write("status.json", &s).await; last = s; }
+                }
+            }
+        }
+    }
+}
+
+mod lytho_ingest {
+    use tokio::fs;
+    use tokio::time::{interval, Duration};
+    pub async fn watch_lytho_folder(path: &str) {
+        let mut interval = interval(Duration::from_secs(30));
+        let mut last_mod = None;
+        loop {
+            interval.tick().await;
+            if let Ok(mut entries) = fs::read_dir(path).await {
+                let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let meta = match entry.metadata().await { Ok(m) => m, Err(_) => continue };
+                    if meta.is_file() && entry.file_name().to_string_lossy().ends_with(".csv") {
+                        if let Ok(modified) = meta.modified() {
+                            if last_mod.map(|lm| modified > lm).unwrap_or(true) {
+                                newest = Some((entry.path(), modified));
+                            }
+                        }
+                    }
+                }
+                if let Some((p, t)) = newest {
+                    println!("[LYTHO] New export: {:?}", p);
+                    if let Err(e) = parse_and_update(&p).await { eprintln!("[LYTHO] Error: {}", e); }
+                    else { last_mod = Some(t); }
+                }
+            }
+        }
+    }
+    async fn parse_and_update(path: &std::path::PathBuf) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let content = tokio::fs::read_to_string(path).await?;
+        let mut rdr = csv::Reader::from_reader(content.as_bytes());
+        let mut projects = Vec::new();
+        for result in rdr.deserialize::<serde_json::Value>() { projects.push(result?); }
+        tokio::fs::write("data/lytho_cache.json", serde_json::to_string_pretty(&projects)?).await?;
+        println!("[LYTHO] Updated {} projects", projects.len());
+        Ok(())
+    }
+}
+
+mod project_manager {
+    use serde_json::Value;
+    use std::fs;
+    pub fn load_projects() -> Vec<Value> {
+        fs::read_to_string("data/lytho_cache.json")
+            .map(|s| serde_json::from_str(&s).unwrap_or_default())
+            .unwrap_or_default()
+    }
+}
+
+mod memory_manager {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::sync::Mutex;
+    use serde_json::json;
+    use chrono::Utc;
+
+    pub struct MemoryManager {
+        journal_path: String,
+        lock: Mutex<()>,
+    }
+
+    impl MemoryManager {
+        pub fn new(path: &str) -> Self {
+            Self {
+                journal_path: path.to_string(),
+                lock: Mutex::new(()),
+            }
+        }
+
+        pub fn append(&self, entry: serde_json::Value) -> Result<(), String> {
+            let _guard = self.lock.lock().unwrap();
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.journal_path)
+                .map_err(|e| e.to_string())?;
+            writeln!(file, "{}", serde_json::to_string(&entry).unwrap())
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        }
+
+        pub fn new_capture_entry(&self, capture_id: &str, content: &str, source: &str) -> serde_json::Value {
+            json!({
+                "entry_id": uuid::Uuid::new_v4().to_string(),
+                "timestamp": Utc::now().to_rfc3339(),
+                "schema_version": 1,
+                "entity_type": "capture",
+                "entity_id": capture_id,
+                "operation": "create",
+                "before_state": null,
+                "after_state": { "content": content, "source": source },
+                "reason_capture_id": null,
+                "approved_by_user": false
+            })
+        }
+    }
+}
+
+mod ai_router {
+    use std::collections::HashMap;
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum ModelType { RuleBased, TinyLocal, CloudGPT }
+    pub struct TaskRouter { rules: HashMap<String, ModelType> }
+    impl TaskRouter {
+        pub fn new() -> Self {
+            let mut rules = HashMap::new();
+            rules.insert("cpu".to_string(), ModelType::RuleBased);
+            rules.insert("keystroke".to_string(), ModelType::RuleBased);
+            rules.insert("summarize".to_string(), ModelType::TinyLocal);
+            rules.insert("analyze".to_string(), ModelType::CloudGPT);
+            rules.insert("plan".to_string(), ModelType::CloudGPT);
+            rules.insert("greet".to_string(), ModelType::TinyLocal);
+            Self { rules }
+        }
+        pub fn route(&self, task: &str) -> ModelType {
+            for (keyword, model) in &self.rules {
+                if task.contains(keyword) { return model.clone(); }
+            }
+            ModelType::TinyLocal
+        }
+    }
+    pub struct AIExecutor { router: TaskRouter }
+    impl AIExecutor {
+        pub fn new() -> Self { Self { router: TaskRouter::new() } }
+        pub async fn execute(&self, task: &str, input: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            let model = self.router.route(task);
+            match model {
+                ModelType::RuleBased => Ok(format!("Rule result for {}: {}", task, input)),
+                ModelType::TinyLocal => self.tiny_local(input).await,
+                ModelType::CloudGPT => Ok(format!("[Cloud GPT] {}", input)),
+            }
+        }
+        async fn tiny_local(&self, prompt: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            let client = reqwest::Client::new();
+            let body = serde_json::json!({
+                "model": "llama3.2",
+                "prompt": prompt,
+                "stream": false
+            });
+            let res = client.post("http://localhost:11434/api/generate")
+                .json(&body)
+                .send()
+                .await?;
+
+            if !res.status().is_success() {
+                return Err(format!("Ollama error: HTTP {}", res.status()).into());
+            }
+
+            let json: serde_json::Value = res.json().await?;
+            let response = json["response"]
+                .as_str()
+                .unwrap_or("No response field");
+
+            Ok(response.to_string())
+        }
+    }
+}
+
+mod ai_sensor {
+    use super::bus::MessageBus;
+    use super::ai_router::AIExecutor;
+    use std::sync::Arc;
+    pub async fn ai_worker(bus: Arc<MessageBus>) {
+        let executor = AIExecutor::new();
+        let mut rx = bus.subscribe();
+        loop {
+            if let Ok(msg) = rx.recv().await {
+                if let Some(rest) = msg.strip_prefix("ai:run:") {
+                    if let Some(pipe_pos) = rest.find('|') {
+                        let task = &rest[..pipe_pos];
+                        let prompt = &rest[pipe_pos+1..];
+                        match executor.execute(task, prompt).await {
+                            Ok(result) => println!("[AI] Result: {}", result),
+                            Err(e) => eprintln!("[AI] Error: {}", e),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+mod packet_ingest {
+    use tokio::fs;
+    use tokio::time::{interval, Duration};
+    use std::path::PathBuf;
+    use super::bus::MessageBus;
+    use super::memory_manager::MemoryManager;
+    use std::sync::Arc;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct Packet {
+        id: String,
+        task: String,
+        prompt: String,
+        _urgency: Option<u8>,
+        #[serde(default)]
+        require_approval: bool,
+    }
+
+    pub async fn watch_packets_folder(bus: Arc<MessageBus>, memory_manager: Arc<MemoryManager>, path: &str) {
+        let mut interval = interval(Duration::from_secs(10));
+        let mut processed = std::collections::HashSet::new();
+        loop {
+            interval.tick().await;
+            if let Ok(mut entries) = fs::read_dir(path).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    if file_name.ends_with(".json") && !processed.contains(&file_name) {
+                        let file_path = entry.path();
+                        match fs::read_to_string(&file_path).await {
+                            Ok(content) => {
+                                match serde_json::from_str::<Packet>(&content) {
+                                    Ok(packet) => {
+                                        println!("[PACKET] New packet: {} (task: {})", packet.id, packet.task);
+                                        let capture_entry = memory_manager.new_capture_entry(
+                                            &packet.id,
+                                            &packet.prompt,
+                                            "packet"
+                                        );
+                                        if let Err(e) = memory_manager.append(capture_entry) {
+                                            eprintln!("[PACKET] Failed to write to journal: {}", e);
+                                        }
+                                        let payload = format!("{}|{}", packet.task, packet.prompt);
+                                        bus.publish("ai:run", &payload);
+                                        if packet.require_approval {
+                                            bus.publish("suggestion", &format!("approve_packet:{}", packet.id));
+                                        }
+                                        processed.insert(file_name);
+                                    }
+                                    Err(e) => eprintln!("[PACKET] JSON parse error: {}", e),
+                                }
+                            }
+                            Err(e) => eprintln!("[PACKET] Cannot read: {}", e),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+mod approval {
+    use std::io::{self, Write};
+    pub async fn request_approval(prompt: &str) -> bool {
+        print!("{} (y/n): ", prompt);
+        io::stdout().flush().unwrap();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap();
+        input.trim().to_lowercase() == "y"
+    }
+}
+
+mod guided_capture {
+    use super::bus::MessageBus;
+    use super::memory_manager::MemoryManager;
+    use super::ai_router::AIExecutor;
+    use super::approval;
+    use std::sync::Arc;
+    use std::io::{self, Write};
+    use serde::Deserialize;
+    use tokio::fs;
+    use tokio::time::{interval, Duration};
+
+    #[derive(Debug, Deserialize)]
+    struct GuidedPacket {
+        id: String,
+        prompt: String,
+        #[serde(default)]
+        context_hint: Option<String>,
+        require_approval: bool,
+    }
+
+    fn manual_json_entry(packet_prompt: &str) -> serde_json::Value {
+        print!("Entity type (capture|decision|project): ");
+        io::stdout().flush().unwrap();
+        let mut et = String::new();
+        io::stdin().read_line(&mut et).unwrap();
+        let entity_type = et.trim();
+
+        print!("Entity ID: ");
+        io::stdout().flush().unwrap();
+        let mut eid = String::new();
+        io::stdin().read_line(&mut eid).unwrap();
+        let entity_id = eid.trim();
+
+        print!("Summary: ");
+        io::stdout().flush().unwrap();
+        let mut sum = String::new();
+        io::stdin().read_line(&mut sum).unwrap();
+        let summary = sum.trim();
+
+        serde_json::json!({
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "after_state": { "summary": summary, "source": packet_prompt }
+        })
+    }
+
+    pub async fn watch_guided_folder(
+        _bus: Arc<MessageBus>,
+        memory_manager: Arc<MemoryManager>,
+        ai_executor: Arc<AIExecutor>,
+        path: &str
+    ) {
+        let mut interval = interval(Duration::from_secs(10));
+        let mut processed = std::collections::HashSet::new();
+
+        loop {
+            interval.tick().await;
+            if let Ok(mut entries) = fs::read_dir(path).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    if file_name.ends_with(".json") && file_name.starts_with("guided_") && !processed.contains(&file_name) {
+                        let file_path = entry.path();
+                        match fs::read_to_string(&file_path).await {
+                            Ok(content) => {
+                                match serde_json::from_str::<GuidedPacket>(&content) {
+                                    Ok(packet) => {
+                                        println!("[GUIDED] Processing: {}", packet.id);
+                                        let ollama_prompt = format!(
+                                            "Output ONLY valid JSON with no markdown or extra text. Based on this note, create an entry with: entity_type (\"capture\", \"decision\", or \"project\"), entity_id (short name), after_state (object with summary field). Note: {}",
+                                            packet.prompt
+                                        );
+
+                                        let mut entry = match ai_executor.execute("summarize", &ollama_prompt).await {
+                                            Ok(ai_output) => {
+                                                match serde_json::from_str::<serde_json::Value>(&ai_output) {
+                                                    Ok(parsed) => parsed,
+                                                    Err(e) => {
+                                                        eprintln!("[GUIDED] Failed to parse AI JSON: {}", e);
+                                                        println!("[GUIDED] Falling back to manual entry.");
+                                                        manual_json_entry(&packet.prompt)
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                eprintln!("[GUIDED] Ollama unavailable: {}", e);
+                                                println!("[GUIDED] Falling back to manual entry.");
+                                                manual_json_entry(&packet.prompt)
+                                            }
+                                        };
+
+                                        entry["entry_id"] = serde_json::Value::String(uuid::Uuid::new_v4().to_string());
+                                        entry["timestamp"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+                                        entry["schema_version"] = serde_json::Value::Number(1.into());
+                                        entry["reason_capture_id"] = serde_json::Value::Null;
+                                        entry["approved_by_user"] = serde_json::Value::Bool(false);
+
+                                        if packet.require_approval {
+                                            println!("\n[GUIDED] Proposed journal entry:");
+                                            println!("{}", serde_json::to_string_pretty(&entry).unwrap());
+                                            if approval::request_approval("Approve this entry?").await {
+                                                if let Err(e) = memory_manager.append(entry) {
+                                                    eprintln!("[GUIDED] Failed to write: {}", e);
+                                                } else {
+                                                    println!("[GUIDED] Entry written to journal.");
+                                                }
+                                            } else {
+                                                println!("[GUIDED] Entry rejected.");
+                                            }
+                                        } else {
+                                            if let Err(e) = memory_manager.append(entry) {
+                                                eprintln!("[GUIDED] Failed to write: {}", e);
+                                            } else {
+                                                println!("[GUIDED] Entry written (auto-approved).");
+                                            }
+                                        }
+                                        processed.insert(file_name);
+                                    }
+                                    Err(e) => eprintln!("[GUIDED] JSON parse error: {}", e),
+                                }
+                            }
+                            Err(e) => eprintln!("[GUIDED] Cannot read: {}", e),
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+use tokio::task;
+use bus::MessageBus;
+use workspace::GlobalWorkspace;
+use std::sync::Arc;
+use memory_manager::MemoryManager;
+use ai_router::AIExecutor;
+
+#[tokio::main]
+async fn main() {
+    let bus = Arc::new(MessageBus::new());
+
+    let memory_manager = Arc::new(MemoryManager::new("data/memory/ledger.jsonl"));
+
+    let ws_bus = bus.clone();
+    task::spawn(async move {
+        let workspace = GlobalWorkspace::new(300);
+        workspace.run(ws_bus).await;
+    });
+
+    task::spawn(sensors::cpu_sensor(bus.clone()));
+    task::spawn(actions::print_action(bus.clone()));
+    task::spawn(observer::pattern_observer(bus.clone()));
+    task::spawn(dashboard::run_server(bus.clone(), "127.0.0.1:8080"));
+    task::spawn(status_writer::write_status_on_change(bus.clone()));
+    task::spawn(lytho_ingest::watch_lytho_folder("./data/lytho"));
+    task::spawn(ai_sensor::ai_worker(bus.clone()));
+
+    let packet_bus = bus.clone();
+    let packet_memory = memory_manager.clone();
+    task::spawn(async move {
+        packet_ingest::watch_packets_folder(packet_bus, packet_memory, "./data/packets").await;
+    });
+
+    let guided_bus = bus.clone();
+    let guided_memory = memory_manager.clone();
+    let guided_ai = Arc::new(AIExecutor::new());
+    task::spawn(async move {
+        guided_capture::watch_guided_folder(guided_bus, guided_memory, guided_ai, "./data/guided").await;
+    });
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+    }
+}

@@ -1,8 +1,9 @@
-﻿use super::bus::MessageBus;
+use super::bus::MessageBus;
 use super::memory_manager::MemoryManager;
 use super::ai_router::AIExecutor;
 use super::approval;
 use std::sync::Arc;
+use std::path::PathBuf;
 use serde::Deserialize;
 use tokio::fs;
 use tokio::time::{interval, Duration};
@@ -39,7 +40,7 @@ pub async fn watch_guided_folder(
                                 Ok(packet) => {
                                     println!("[GUIDED] Processing: {}", packet.id);
                                     let ollama_prompt = format!(
-                                        "Output ONLY valid JSON (no extra text, no markdown). Use this format: {{\"entity_type\":\"...\", \"entity_id\":\"...\", \"after_state\":{{\"summary\":\"...\"}}}}. User note: {}",
+                                        "Classify this note into entity_type, entity_id, and after_state.summary. Respond with ONLY a JSON object, no markdown, no explanation. entity_type must be one of: capture, decision, project, error. entity_id must be a snake_case identifier with no dots or ellipsis. after_state.summary must be one sentence. Note: {}. Example output: {{\"entity_type\":\"decision\",\"entity_id\":\"use_ollama_local\",\"after_state\":{{\"summary\":\"Chose Ollama for local inference to reduce cost.\"}}}}",
                                         packet.prompt
                                     );
                                     match ai_executor.execute("summarize", &ollama_prompt).await {
@@ -87,7 +88,15 @@ pub async fn watch_guided_folder(
                                             manual_entry(&memory_manager, &packet).await;
                                         }
                                     }
-                                    processed.insert(file_name);
+                                    processed.insert(file_name.clone());
+                                    let archive_dir = PathBuf::from(path).join("archive");
+                                    let _ = fs::create_dir_all(&archive_dir).await;
+                                    let dest = archive_dir.join(&file_name);
+                                    if let Err(e) = fs::rename(&file_path, &dest).await {
+                                        eprintln!("[GUIDED] Failed to archive {}: {}", file_name, e);
+                                    } else {
+                                        println!("[GUIDED] Archived: {}", file_name);
+                                    }
                                 }
                                 Err(e) => eprintln!("[GUIDED] JSON parse error: {}", e),
                             }
@@ -146,3 +155,4 @@ async fn manual_entry(memory_manager: &Arc<MemoryManager>, packet: &GuidedPacket
         }
     }
 }
+

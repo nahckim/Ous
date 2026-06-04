@@ -1,4 +1,4 @@
-﻿use super::bus::MessageBus;
+use super::bus::MessageBus;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ pub async fn pattern_observer(bus: Arc<MessageBus>) {
             let last10: Vec<&String> = history.iter().rev().take(10).collect();
             let count = last10.iter().filter(|&m| *m == &msg).count();
             if count >= 3 {
-                println!("[OBSERVER] Pattern detected: {}", msg);
+                // suppressed
                 bus.publish("pattern", &format!("pattern:{}", msg));
             }
         }

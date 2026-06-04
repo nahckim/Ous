@@ -1,0 +1,1 @@
+{"require_approval":false,"prompt":"bug: guided_capture falls back to manual due to ai_router.rs using port 11435 instead of 11434. Fix: replace 11435 with 11434 in ai_router.rs TinyLocal block.","task":"note","id":"53ce97e9-89cb-4569-a7d4-58f51b94373b","type":"regular"}

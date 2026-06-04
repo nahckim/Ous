@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use reqwest;
 use serde_json::json;
 
@@ -43,7 +43,7 @@ impl AIExecutor {
                     "prompt": input,
                     "stream": false
                 });
-                let res = client.post("http://localhost:11435/api/generate")
+                let res = client.post("http://localhost:11434/api/generate")
                     .json(&body)
                     .send()
                     .await?;

@@ -1,0 +1,6 @@
+{
+  "id": "guided-001",
+  "prompt": "We decided to change workspace cycle time from 300ms to 500ms because CPU was too chatty.",
+  "context_hint": "os",
+  "require_approval": true
+}

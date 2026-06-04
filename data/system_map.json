@@ -1,0 +1,29 @@
+{
+  "input": [
+    {"name": "packet_ingest", "type": "input", "status": "active"},
+    {"name": "guided_capture", "type": "input", "status": "active"},
+    {"name": "lytho_ingest", "type": "input", "status": "active"}
+  ],
+  "ai": [
+    {"name": "ai_router", "type": "ai", "status": "active"},
+    {"name": "ollama/llama3.2", "type": "ai", "status": "local"},
+    {"name": "deepseek-chat", "type": "ai", "status": "pending-key"},
+    {"name": "ai_sensor", "type": "ai", "status": "active"}
+  ],
+  "memory": [
+    {"name": "ledger.jsonl", "type": "memory", "status": "active"},
+    {"name": "memory_manager", "type": "memory", "status": "active"},
+    {"name": "daily_notes", "type": "memory", "status": "active"},
+    {"name": "minor_league", "type": "memory", "status": "active"},
+    {"name": "dreaming", "type": "memory", "status": "active"},
+    {"name": "MEMORY.md", "type": "memory", "status": "active"}
+  ],
+  "system": [
+    {"name": "bus", "type": "system", "status": "active"},
+    {"name": "workspace", "type": "system", "status": "active"},
+    {"name": "master_pm", "type": "system", "status": "active"},
+    {"name": "work_manager", "type": "system", "status": "active"},
+    {"name": "dashboard", "type": "system", "status": "active"},
+    {"name": "sensors/cpu", "type": "system", "status": "active"}
+  ]
+}

@@ -1,0 +1,1 @@
+{"require_approval":false,"prompt":"preferred file write method: single-line string with backtick-n for newlines, Set-Content. Avoid heredoc in chat context.","task":"note","id":"cc7cd2a6-6017-4db0-bc4f-2eeed40cdfb9","type":"regular"}
