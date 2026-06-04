@@ -28,8 +28,14 @@ pub async fn watch_packets_folder(bus: Arc<MessageBus>, memory_manager: Arc<Memo
                 let file_name = entry.file_name().to_string_lossy().to_string();
                 if file_name.ends_with(".json") && !file_name.contains("archive") {
                     let file_path = entry.path();
-                    match fs::read_to_string(&file_path).await {
-                        Ok(content) => {
+                    match fs::read(&file_path).await {
+                        Ok(raw) => {
+                            let lossy = String::from_utf8_lossy(&raw);
+                            if matches!(lossy, std::borrow::Cow::Owned(_)) {
+                                eprintln!("[PACKET] Warning: {} contains invalid UTF-8 bytes; substituted replacement chars", file_name);
+                            }
+                            let content = lossy.into_owned();
+                            let content = content.as_str();
                             let process_result = match serde_json::from_str::<Packet>(&content) {
                                 Ok(Packet::Regular { id, task, prompt, require_approval }) => {
                                     println!("[PACKET] Regular packet: {} (task: {})", id, task);
@@ -177,7 +183,7 @@ pub async fn watch_packets_folder(bus: Arc<MessageBus>, memory_manager: Arc<Memo
                                 }
                             }
                         }
-                        Err(e) => eprintln!("[PACKET] Cannot read {}: {}", file_path.display(), e),
+                        Err(e) => eprintln!("[PACKET] Cannot read bytes from {}: {}", file_path.display(), e),
                     }
                 }
             }

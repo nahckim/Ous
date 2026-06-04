@@ -1,7 +1,9 @@
 use super::bus::MessageBus;
 use super::memory_manager::MemoryManager;
+use super::melatonin::run_melatonin;
 use std::sync::Arc;
 use tiny_http::{Server, Response, Header, Method};
+use tokio::task;
 use std::str::FromStr;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -110,6 +112,16 @@ pub async fn run_server(bus: Arc<MessageBus>, projects: SharedProjectMap, addr: 
                     bus.publish("dream:trigger", "");
                     println!("[Dashboard] Dream trigger published");
                     Response::from_string("{\"status\":\"dream_triggered\"}").with_header(content_type_json.clone())
+                }
+                (Method::Post, "/trigger/dream") => {
+                    bus.publish("dream:trigger", "");
+                    println!("[Dashboard] Dream trigger published via /trigger/dream");
+                    Response::from_string("dream triggered").with_status_code(200)
+                }
+                (Method::Post, "/trigger/melatonin") => {
+                    task::spawn(run_melatonin(memory_manager.clone()));
+                    println!("[Dashboard] Melatonin spawned via /trigger/melatonin");
+                    Response::from_string("melatonin triggered").with_status_code(200)
                 }
                 (Method::Post, "/approve") => {
                     let mut body = String::new();

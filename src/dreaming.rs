@@ -37,7 +37,7 @@ pub async fn run_dreaming(bus: Arc<MessageBus>, memory_manager: Arc<MemoryManage
                 }
 
                 let prompt = format!(
-                    "You are Ous, a cognitive OS. Review the following recent journal entries and the existing MEMORY.md. Propose updates to MEMORY.md (add/update/remove) as a JSON list of actions. Each action: {{\"action\":\"add\",\"section\":\"...\",\"content\":\"...\"}} or {{\"action\":\"update\",\"section\":\"...\",\"old\":\"...\",\"new\":\"...\"}}. Output ONLY valid JSON.\n\n{}\nRecent entries:\n{}\n\nExisting MEMORY.md:\n{}\n",
+                    "You are Ous, a cognitive OS. Review the recent journal entries and existing MEMORY.md. Propose updates as a JSON array. Each element must match one of these schemas exactly:\n\n{{\"action\":\"add\",\"section\":\"<heading>\",\"content\":\"<markdown text>\"}}\n{{\"action\":\"update\",\"section\":\"<heading>\",\"old\":\"<exact existing text>\",\"new\":\"<replacement text>\"}}\n{{\"action\":\"remove\",\"section\":\"<heading>\",\"content\":\"<exact text to remove>\"}}\n\nOutput ONLY a valid JSON array. No preamble, no markdown fences, no explanation.\n\n{}\nRecent entries:\n{}\n\nExisting MEMORY.md:\n{}\n",
                     suggestions, recent_json, existing_memory
                 );
                 match ai_executor.execute("summarize", &prompt).await {
@@ -59,10 +59,30 @@ pub async fn run_dreaming(bus: Arc<MessageBus>, memory_manager: Arc<MemoryManage
                                 let mut new_memory = existing_memory;
                                 for prop in proposals {
                                     if let Some(action) = prop["action"].as_str() {
-                                        if action == "add" {
-                                            let section = prop["section"].as_str().unwrap_or("");
-                                            let content = prop["content"].as_str().unwrap_or("");
-                                            new_memory.push_str(&format!("\n## {}\n{}\n", section, content));
+                                        match action {
+                                            "add" => {
+                                                let section = prop["section"].as_str().unwrap_or("");
+                                                let content = prop["content"].as_str().unwrap_or("");
+                                                new_memory.push_str(&format!("\n## {}\n{}\n", section, content));
+                                            }
+                                            "update" => {
+                                                let old = prop["old"].as_str().unwrap_or("");
+                                                let new = prop["new"].as_str().unwrap_or("");
+                                                if new_memory.contains(old) {
+                                                    new_memory = new_memory.replacen(old, new, 1);
+                                                } else {
+                                                    eprintln!("[Dreaming] WARN: update — old text not found in MEMORY.md");
+                                                }
+                                            }
+                                            "remove" => {
+                                                let content = prop["content"].as_str().unwrap_or("");
+                                                if new_memory.contains(content) {
+                                                    new_memory = new_memory.replacen(content, "", 1);
+                                                } else {
+                                                    eprintln!("[Dreaming] WARN: remove — content not found in MEMORY.md");
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
